@@ -1,0 +1,89 @@
+name: build
+on:
+  push:
+concurrency: build
+permissions:
+  packages: write
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - linux/386
+        - linux/amd64
+        - linux/arm/v5
+        - linux/arm/v6
+        - linux/arm/v7
+        - linux/arm64/v8
+        - linux/mips
+        - linux/mipsle
+        - linux/mips64
+        - linux/mips64le
+        - linux/ppc64
+        - linux/ppc64le
+        - linux/s390x
+        - linux/riscv64
+        - linux/loong64
+    steps:
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
+      if: ${{ github.ref == 'refs/heads/main' }}
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    - name: Build and push image for ${{ matrix.platform }}
+      id: build
+      uses: docker/build-push-action@v6
+      env:
+        DOCKER_BUILD_RECORD_UPLOAD: 'false'
+        DOCKER_BUILD_SUMMARY: 'false'
+        SOURCE_DATE_EPOCH: '0'
+      with:
+        tags: ghcr.io/${{ github.repository }}
+        provenance: false
+        platforms: ${{ matrix.platform }}
+        outputs: type=image,oci-mediatypes=true,push-by-digest=true,name-canonical=true,rewrite-timestamp=true,push=${{ github.ref == 'refs/heads/main' }}
+    - name: Export RepoDigest
+      if: ${{ github.ref == 'refs/heads/main' }}
+      working-directory: ${{ runner.temp }}
+      env:
+        PLATFORM: ${{ matrix.platform }}
+        REPO_DIGEST: ${{ steps.build.outputs.digest }}
+      run: |-
+        PLATFORM_DASH=${PLATFORM//\//-}
+        echo "PLATFORM_DASH=${PLATFORM_DASH}" >> "${GITHUB_ENV}"
+        echo -n "${REPO_DIGEST}" > "RepoDigest-${PLATFORM_DASH}"
+    - name: Upload RepoDigest
+      if: ${{ github.ref == 'refs/heads/main' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: RepoDigest-${{ env.PLATFORM_DASH }}
+        path: ${{ runner.temp }}/RepoDigest-*
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0
+  create-image-index:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    - name: Download digests
+      uses: actions/download-artifact@v4
+      with:
+        path: ${{ runner.temp }}
+        pattern: RepoDigest-*
+        merge-multiple: true
+    - name: Create image index and push
+      working-directory: ${{ runner.temp }}
+      run: docker buildx imagetools create --tag "ghcr.io/${GITHUB_REPOSITORY}:latest" $(sed -e "s|^|ghcr.io/${GITHUB_REPOSITORY}@|" RepoDigest-*)
+    - name: Inspect image
+      run: docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY}:latest"
